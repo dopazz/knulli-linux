@@ -1,0 +1,44 @@
+usb: sunxi-udc: don't busy-wait 5 ms for a short packet
+
+With DMA on an OUT endpoint, a transfer that ends in a short packet
+leaves it in the FIFO with RxPktRdy set, since the DMA only takes full
+packets. dma_got_short_pkt() tells that apart from a full packet the
+DMA is still draining by polling RxPktRdy, in the interrupt handler,
+for up to 1000 x 5 us, so every short-ended transfer cost 5 ms with
+interrupts off on that CPU.
+
+With a CDC NCM gadget many transfers from the host end short: on the
+H700 (RG SP) the host's 16 KB NTBs took about 0.6 ms each when full,
+but 204 short-ended ones out of 793 in 1.5 s waited 5.4-5.8 ms each,
+about 70% of the time, holding reception to 6.8 MB/s (21.5 MB/s the
+other way). The FIFO held 44-164 bytes every time.
+
+The DMA drains a full 512-byte packet in about 20 us, so poll for
+200 us instead.
+
+--- a/drivers/usb/sunxi_usb/udc/sunxi_udc.c	2026-11-09 19:26:41.490239210 -0500
++++ b/drivers/usb/sunxi_usb/udc/sunxi_udc.c	2026-11-09 19:26:49.838703591 -0500
+@@ -882,15 +882,21 @@
+  * If not, we consider a short packet comes in and we will
+  * deal with it then.
+  *
+- * FIXME: The longest time to confirm is up to (5us * 1000).
++ * The DMA drains a full packet in about 20us (512 bytes at high speed),
++ * so 200us is plenty to tell a full packet it is taking from a short
++ * one it never will. This used to wait up to 5ms, in the interrupt
++ * handler, for every transfer ending in a short packet: with CDC NCM
++ * that was most of the time spent receiving (6.8 MB/s on the H700).
+  */
++#define SUNXI_UDC_RX_READY_TRIES	40	/* x 5us */
++
+ #ifdef SW_UDC_DMA_INNER
+ static int sunxi_udc_confirm_rx_ready(void)
+ {
+ 	int i = 0;
+ 	int rx_ready_flag = 1;
+ 
+-	for (i = 0; i < 1000; i++) {
++	for (i = 0; i < SUNXI_UDC_RX_READY_TRIES; i++) {
+ 		if (!USBC_Dev_IsReadDataReady(g_sunxi_udc_io.usb_bsp_hdle, USBC_EP_TYPE_RX)) {
+ 			rx_ready_flag = 0;
+ 			break;
